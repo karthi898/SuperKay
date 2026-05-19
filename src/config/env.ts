@@ -3,11 +3,9 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const requiredEnvVars = [
-  'OPENAI_API_KEY',
+  'GROQ_API_KEY',
   'GMAIL_CLIENT_ID',
   'GMAIL_CLIENT_SECRET',
-  'GMAIL_REDIRECT_URI',
-  'SLACK_WEBHOOK_URL',
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -16,18 +14,23 @@ for (const envVar of requiredEnvVars) {
   }
 }
 
+if (!process.env.SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) {
+  console.warn('[config] Neither SLACK_BOT_TOKEN nor SLACK_WEBHOOK_URL is set — Slack alerts will be skipped.');
+}
+
 export const config = {
   openai: {
-    apiKey: process.env.OPENAI_API_KEY!,
-    model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+    apiKey: process.env.GROQ_API_KEY!,
+    model: process.env.GROQ_MODEL || 'llama3-8b-8192',
   },
   gmail: {
     clientId: process.env.GMAIL_CLIENT_ID!,
     clientSecret: process.env.GMAIL_CLIENT_SECRET!,
-    redirectUri: process.env.GMAIL_REDIRECT_URI!,
+    redirectUri: process.env.GMAIL_REDIRECT_URI || 'http://localhost:3000/auth/google/callback',
   },
   slack: {
-    webhookUrl: process.env.SLACK_WEBHOOK_URL!,
+    webhookUrl: process.env.SLACK_WEBHOOK_URL || '',
+    botToken: process.env.SLACK_BOT_TOKEN || '',
   },
   server: {
     port: parseInt(process.env.PORT || '3000', 10),

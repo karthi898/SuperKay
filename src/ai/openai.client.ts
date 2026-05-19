@@ -4,6 +4,7 @@ import logger from '../utils/logger';
 
 const client = new OpenAI({
   apiKey: config.openai.apiKey,
+  baseURL: 'https://api.groq.com/openai/v1',
 });
 
 export async function callOpenAI(prompt: string): Promise<string> {
