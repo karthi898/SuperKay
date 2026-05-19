@@ -21,7 +21,7 @@ if (!process.env.SLACK_BOT_TOKEN && !process.env.SLACK_WEBHOOK_URL) {
 export const config = {
   openai: {
     apiKey: process.env.GROQ_API_KEY!,
-    model: process.env.GROQ_MODEL || 'llama3-8b-8192',
+    model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
   },
   gmail: {
     clientId: process.env.GMAIL_CLIENT_ID!,
