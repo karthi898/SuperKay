@@ -113,6 +113,9 @@ fastify.get('/auth/google/callback/mobile', async (request, reply) => {
       },
     });
 
+    // Start polling if not already running (first sign-in after cold boot)
+    if (!pollingInterval) startPolling(user.id);
+
     logger.info({ email: userInfo.email }, 'Mobile OAuth complete');
     return reply.redirect(`superkay://auth?token=${sessionToken}`);
   } catch (err) {
@@ -140,98 +143,82 @@ async function loadSession(authHeader?: string): Promise<string | null> {
   return session.userId;
 }
 
+// Shared processing logic used by both /process and the polling interval
+async function runProcessingCycle(userId: string | null): Promise<number> {
+  const emails = await fetchUnreadEmails();
+  if (emails.length === 0) return 0;
+
+  let count = 0;
+  for (const email of emails) {
+    try {
+      let classification = await classifyEmail(email);
+      if (email.subject.startsWith('Re:') || email.subject.startsWith('Fwd:')) {
+        classification = {
+          ...classification,
+          important: true,
+          priority: Math.max(classification.priority, 7),
+          reason: 'Automatic: This is a reply or forwarded message',
+        };
+      }
+
+      await prisma.processedEmail.create({
+        data: {
+          messageId: email.messageId,
+          threadId: email.threadId,
+          sender: email.sender,
+          subject: email.subject,
+          body: email.body,
+          category: classification.category,
+          summary: classification.summary,
+          important: classification.important,
+          priority: classification.priority,
+          confidence: classification.confidence,
+          ...(userId ? { userId } : {}),
+        },
+      });
+
+      try {
+        await sendSlackAlert({
+          from: email.sender,
+          subject: email.subject,
+          priority: classification.priority,
+          reason: classification.reason,
+          summary: classification.summary,
+          threadId: email.threadId,
+        });
+      } catch (slackError) {
+        logger.error({ slackError: slackError instanceof Error ? slackError.message : String(slackError) }, 'Slack alert failed, continuing');
+      }
+
+      if (classification.reply_needed) {
+        const draftReply = await generateDraftReply(email);
+        if (draftReply) {
+          await createGmailDraft({
+            threadId: email.threadId,
+            subject: email.subject,
+            to: email.sender,
+            replyText: draftReply,
+          });
+        }
+      }
+
+      await markAsProcessed(email.messageId);
+      count++;
+    } catch (error) {
+      logger.error({ error, messageId: email.messageId }, 'Failed to process email');
+    }
+  }
+  logger.info({ count }, 'Processing cycle complete');
+  return count;
+}
+
 // Process emails manually
 fastify.post('/process', async (request, reply) => {
   const userId = await loadSession(request.headers.authorization);
   try {
     logger.info('Manual email processing started');
-    const emails = await fetchUnreadEmails();
-
-    if (emails.length === 0) {
-      return reply.send({ message: 'No unread emails', processed: 0 });
-    }
-
-    let processedCount = 0;
-
-    for (const email of emails) {
-      try {
-        // Classify email
-        let classification = await classifyEmail(email);
-
-        // Force important flag for replies/forwards - these are responses we should know about
-        if (email.subject.startsWith('Re:') || email.subject.startsWith('Fwd:')) {
-          logger.info({ subject: email.subject }, 'Detected reply/forward - marking as important');
-          classification.important = true;
-          classification.priority = Math.max(classification.priority, 7);
-          classification.reason = 'Automatic: This is a reply or forwarded message';
-        }
-
-        // Store in database
-        await prisma.processedEmail.create({
-          data: {
-            messageId: email.messageId,
-            threadId: email.threadId,
-            sender: email.sender,
-            subject: email.subject,
-            body: email.body,
-            category: classification.category,
-            summary: classification.summary,
-            important: classification.important,
-            priority: classification.priority,
-            confidence: classification.confidence,
-            ...(userId ? { userId } : {}),
-          },
-        });
-
-        // Send Slack alert for ALL emails
-        try {
-          await sendSlackAlert({
-            from: email.sender,
-            subject: email.subject,
-            priority: classification.priority,
-            reason: classification.reason,
-            summary: classification.summary,
-            threadId: email.threadId,
-          });
-          logger.info({ subject: email.subject, sender: email.sender }, 'Slack alert sent for email');
-        } catch (slackError) {
-          logger.error({ 
-            slackError: slackError instanceof Error ? slackError.message : String(slackError),
-            subject: email.subject,
-            sender: email.sender
-          }, 'Failed to send Slack alert, but continuing with email processing');
-        }
-
-        // Generate draft reply if needed
-        if (classification.reply_needed) {
-          const draftReply = await generateDraftReply(email);
-          if (draftReply) {
-            await createGmailDraft({
-              threadId: email.threadId,
-              subject: email.subject,
-              to: email.sender,
-              replyText: draftReply,
-            });
-          }
-        }
-
-        // Mark as processed
-        await markAsProcessed(email.messageId);
-        processedCount++;
-      } catch (error) {
-        logger.error(
-          { error, messageId: email.messageId },
-          'Failed to process email'
-        );
-      }
-    }
-
-    logger.info({ count: processedCount }, 'Email processing completed');
-    return reply.send({
-      message: 'Emails processed',
-      processed: processedCount,
-      total: emails.length,
-    });
+    const count = await runProcessingCycle(userId);
+    return reply.send({ message: count === 0 ? 'No unread emails' : 'Emails processed', processed: count });
   } catch (error) {
     logger.error({ error }, 'Failed to process emails');
     return reply.code(500).send({ error: 'Processing failed' });
@@ -260,98 +247,25 @@ fastify.get('/emails/category/:category', async (request) => {
   return { emails, count: emails.length };
 });
 
-// Polling interval
 let pollingInterval: NodeJS.Timeout | null = null;
+let pollingUserId: string | null = null;
 
-fastify.post('/polling/start', async () => {
-  if (pollingInterval) {
-    return { message: 'Polling already running' };
-  }
-
+function startPolling(userId: string | null) {
+  if (pollingInterval) return;
+  pollingUserId = userId;
   pollingInterval = setInterval(async () => {
     try {
-      logger.debug('Running scheduled email check');
-      const emails = await fetchUnreadEmails();
-
-      for (const email of emails) {
-        try {
-          const classification = await classifyEmail(email);
-
-          // Force important flag for replies/forwards
-          let finalClassification = classification;
-          if (email.subject.startsWith('Re:') || email.subject.startsWith('Fwd:')) {
-            logger.info({ subject: email.subject }, 'Detected reply/forward during polling - marking as important');
-            finalClassification = {
-              ...classification,
-              important: true,
-              priority: Math.max(classification.priority, 7),
-              reason: 'Automatic: This is a reply or forwarded message',
-            };
-          }
-
-          await prisma.processedEmail.create({
-            data: {
-              messageId: email.messageId,
-              threadId: email.threadId,
-              sender: email.sender,
-              subject: email.subject,
-              body: email.body,
-              category: finalClassification.category,
-              summary: finalClassification.summary,
-              important: finalClassification.important,
-              priority: finalClassification.priority,
-              confidence: finalClassification.confidence,
-            },
-          });
-
-          // Send Slack alert for ALL emails
-          try {
-            await sendSlackAlert({
-              from: email.sender,
-              subject: email.subject,
-              priority: finalClassification.priority,
-              reason: finalClassification.reason,
-              summary: finalClassification.summary,
-              threadId: email.threadId,
-            });
-            logger.info({ subject: email.subject, sender: email.sender }, 'Slack alert sent for email during polling');
-          } catch (slackError) {
-            logger.error({ 
-              slackError: slackError instanceof Error ? slackError.message : String(slackError),
-              subject: email.subject,
-              sender: email.sender
-            }, 'Failed to send Slack alert during polling, but continuing');
-          }
-
-          if (classification.reply_needed) {
-            const draftReply = await generateDraftReply(email);
-            if (draftReply) {
-              await createGmailDraft({
-                threadId: email.threadId,
-                subject: email.subject,
-                to: email.sender,
-                replyText: draftReply,
-              });
-            }
-          }
-
-          await markAsProcessed(email.messageId);
-        } catch (error) {
-          logger.error(
-            { error, messageId: email.messageId },
-            'Failed to process email in polling'
-          );
-        }
-      }
+      await runProcessingCycle(pollingUserId);
     } catch (error) {
       logger.error({ error }, 'Polling cycle failed');
     }
   }, config.polling.intervalMs);
+  logger.info({ intervalMs: config.polling.intervalMs }, 'Email polling started');
+}
 
-  logger.info(
-    { intervalMs: config.polling.intervalMs },
-    'Email polling started'
-  );
+fastify.post('/polling/start', async () => {
+  if (pollingInterval) return { message: 'Polling already running' };
+  startPolling(pollingUserId);
   return { message: 'Polling started', intervalMs: config.polling.intervalMs };
 });
 
@@ -382,10 +296,24 @@ signals.forEach((signal) => {
 const start = async () => {
   try {
     await fastify.listen({ port: config.server.port, host: '0.0.0.0' });
-    logger.info(
-      { port: config.server.port },
-      'Server started successfully'
-    );
+    logger.info({ port: config.server.port }, 'Server started successfully');
+
+    // Load most recent user credentials and auto-start polling
+    const user = await prisma.user.findFirst({
+      where: { accessToken: { not: null } },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (user?.accessToken) {
+      setCredentials({
+        access_token: user.accessToken,
+        refresh_token: user.refreshToken ?? undefined,
+        expiry_date: user.tokenExpiry?.getTime(),
+      });
+      startPolling(user.id);
+      logger.info({ email: user.email }, 'Auto-polling started with stored credentials');
+    } else {
+      logger.info('No stored credentials — polling will start after first sign-in');
+    }
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     process.exit(1);

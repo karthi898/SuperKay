@@ -33,8 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV NODE_ENV=production
 ENV PORT=8080
-# Cloud Scheduler hits /process; no need for in-process polling.
-ENV POLLING_AUTO_START=false
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
