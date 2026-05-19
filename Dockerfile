@@ -41,5 +41,4 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 COPY package*.json ./
 
-# Apply any pending Postgres migrations against the Neon DB on boot, then start.
-CMD sh -c "npx prisma migrate deploy && node dist/index.js"
+CMD sh -c "npx prisma migrate resolve --rolled-back 20260513092521_init 2>/dev/null; npx prisma migrate deploy && node dist/index.js"
