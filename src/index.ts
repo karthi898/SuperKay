@@ -3,7 +3,7 @@ import fastifyCors from '@fastify/cors';
 import { google } from 'googleapis';
 import { config } from './config/env';
 import logger from './utils/logger';
-import { getAuthUrl, setCredentials, getOAuth2Client } from './gmail/gmail.client';
+import { getAuthUrl, setCredentials, getOAuth2Client, setOnTokenRefresh } from './gmail/gmail.client';
 import { fetchUnreadEmails, markAsProcessed } from './gmail/gmail.poller';
 import { classifyEmail } from './ai/classify';
 import { generateDraftReply } from './ai/draftReply';
@@ -113,6 +113,9 @@ fastify.get('/auth/google/callback/mobile', async (request, reply) => {
       },
     });
 
+    // Track this user for token-refresh persistence
+    setCredentials(tokens, user.id);
+
     // Start polling if not already running (first sign-in after cold boot)
     if (!pollingInterval) startPolling(user.id);
 
@@ -138,7 +141,7 @@ async function loadSession(authHeader?: string): Promise<string | null> {
       access_token: session.user.accessToken,
       refresh_token: session.user.refreshToken ?? undefined,
       expiry_date: session.user.tokenExpiry?.getTime(),
-    });
+    }, session.userId);
   }
   return session.userId;
 }
@@ -303,12 +306,23 @@ const start = async () => {
       where: { accessToken: { not: null } },
       orderBy: { updatedAt: 'desc' },
     });
+    setOnTokenRefresh(async (userId, tokens) => {
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          accessToken: tokens.access_token ?? undefined,
+          tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined,
+        },
+      });
+      logger.info({ userId }, 'Refreshed tokens saved to DB');
+    });
+
     if (user?.accessToken) {
       setCredentials({
         access_token: user.accessToken,
         refresh_token: user.refreshToken ?? undefined,
         expiry_date: user.tokenExpiry?.getTime(),
-      });
+      }, user.id);
       startPolling(user.id);
       logger.info({ email: user.email }, 'Auto-polling started with stored credentials');
     } else {
