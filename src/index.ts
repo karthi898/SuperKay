@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
+import { google } from 'googleapis';
 import { config } from './config/env';
 import logger from './utils/logger';
 import { getAuthUrl, setCredentials, getOAuth2Client } from './gmail/gmail.client';
@@ -50,8 +51,98 @@ fastify.get('/auth/url', async () => {
   return { authUrl: getAuthUrl() };
 });
 
+// Mobile OAuth — redirect browser to Google
+fastify.get('/auth/google/mobile', async (_request, reply) => {
+  const oauth2Client = getOAuth2Client();
+  const authUrl = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+    ],
+  });
+  return reply.redirect(authUrl);
+});
+
+// Mobile OAuth callback — exchange code, create session, redirect to app
+fastify.get('/auth/google/callback/mobile', async (request, reply) => {
+  const { code, error } = request.query as { code?: string; error?: string };
+
+  if (error || !code) {
+    return reply.redirect(`superkay://auth?error=${encodeURIComponent(error ?? 'missing_code')}`);
+  }
+
+  try {
+    const oauth2Client = getOAuth2Client();
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const { data: userInfo } = await oauth2.userinfo.get();
+
+    if (!userInfo.email) {
+      return reply.redirect('superkay://auth?error=no_email');
+    }
+
+    const user = await prisma.user.upsert({
+      where: { email: userInfo.email },
+      update: {
+        name: userInfo.name ?? undefined,
+        accessToken: tokens.access_token ?? undefined,
+        refreshToken: tokens.refresh_token ?? undefined,
+        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined,
+      },
+      create: {
+        email: userInfo.email,
+        name: userInfo.name ?? undefined,
+        accessToken: tokens.access_token ?? undefined,
+        refreshToken: tokens.refresh_token ?? undefined,
+        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined,
+      },
+    });
+
+    const sessionToken = crypto.randomUUID();
+    await prisma.mobileSession.create({
+      data: {
+        token: sessionToken,
+        userId: user.id,
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    logger.info({ email: userInfo.email }, 'Mobile OAuth complete');
+    return reply.redirect(`superkay://auth?token=${sessionToken}`);
+  } catch (err) {
+    logger.error({ err }, 'Mobile OAuth callback failed');
+    return reply.redirect('superkay://auth?error=auth_failed');
+  }
+});
+
+// Load credentials from Bearer token, returns userId or null
+async function loadSession(authHeader?: string): Promise<string | null> {
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  const session = await prisma.mobileSession.findUnique({
+    where: { token },
+    include: { user: true },
+  });
+  if (!session || session.expiresAt < new Date()) return null;
+  if (session.user.accessToken) {
+    setCredentials({
+      access_token: session.user.accessToken,
+      refresh_token: session.user.refreshToken ?? undefined,
+      expiry_date: session.user.tokenExpiry?.getTime(),
+    });
+  }
+  return session.userId;
+}
+
 // Process emails manually
 fastify.post('/process', async (request, reply) => {
+  const userId = await loadSession(request.headers.authorization);
   try {
     logger.info('Manual email processing started');
     const emails = await fetchUnreadEmails();
@@ -88,6 +179,7 @@ fastify.post('/process', async (request, reply) => {
             important: classification.important,
             priority: classification.priority,
             confidence: classification.confidence,
+            ...(userId ? { userId } : {}),
           },
         });
 
@@ -147,8 +239,10 @@ fastify.post('/process', async (request, reply) => {
 });
 
 // Get processed emails
-fastify.get('/emails', async () => {
+fastify.get('/emails', async (request) => {
+  const userId = await loadSession(request.headers.authorization);
   const emails = await prisma.processedEmail.findMany({
+    where: userId ? { userId } : undefined,
     orderBy: { createdAt: 'desc' },
     take: 50,
   });
