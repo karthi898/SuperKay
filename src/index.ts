@@ -260,6 +260,28 @@ fastify.get('/emails/category/:category', async (request) => {
   return { emails, count: emails.length };
 });
 
+// Auto-generate a draft reply for a message (no user input needed)
+fastify.get('/draft/:messageId', async (request, reply) => {
+  const { messageId } = request.params as { messageId: string };
+  const email = await prisma.processedEmail.findUnique({ where: { messageId } });
+  if (!email) return reply.code(404).send({ error: 'Email not found' });
+  try {
+    const draft = await generateDraftReply({
+      channel: 'gmail',
+      messageId: email.messageId,
+      threadId: email.threadId,
+      sender: email.sender,
+      subject: email.subject,
+      body: email.body,
+      timestamp: email.createdAt.toISOString(),
+    });
+    return reply.send({ draft: draft ?? '' });
+  } catch (err) {
+    logger.error({ err }, 'Failed to generate draft');
+    return reply.code(500).send({ error: err instanceof Error ? err.message : 'Generate failed' });
+  }
+});
+
 // Polish a casual draft into a professional reply (preview only — does not send)
 fastify.post('/reply', async (request, reply) => {
   const { messageId, casualDraft } = request.body as { messageId: string; casualDraft: string };
@@ -275,7 +297,7 @@ fastify.post('/reply', async (request, reply) => {
     return reply.send({ polished });
   } catch (err) {
     logger.error({ err }, 'Failed to polish draft');
-    return reply.code(500).send({ error: 'Polish failed' });
+    return reply.code(500).send({ error: err instanceof Error ? err.message : 'Polish failed' });
   }
 });
 
