@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.env
+.env.local
+.gmail-tokens.json
+*.db
+*.db-journal
+prisma/dev.db
+prisma/migrations/dev.db
+.DS_Store
+npm-debug.log
+README.md
+SETUP.md
