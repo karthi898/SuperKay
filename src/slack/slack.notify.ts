@@ -79,9 +79,19 @@ export async function sendSlackAlert({
       ],
     };
 
-    await axios.post(config.slack.webhookUrl, payload);
-    logger.info({ subject }, 'Slack notification sent');
+    const response = await axios.post(config.slack.webhookUrl, payload);
+    
+    if (response.status !== 200) {
+      throw new Error(`Slack API returned status ${response.status}`);
+    }
+    
+    logger.info({ subject, status: response.status }, 'Slack notification sent successfully');
   } catch (error) {
-    logger.error({ error, subject }, 'Failed to send Slack notification');
+    logger.error({ 
+      error: error instanceof Error ? error.message : String(error), 
+      subject,
+      webhookUrl: config.slack.webhookUrl 
+    }, 'Failed to send Slack notification');
+    throw error;
   }
 }

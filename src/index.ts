@@ -65,7 +65,15 @@ fastify.post('/process', async (request, reply) => {
     for (const email of emails) {
       try {
         // Classify email
-        const classification = await classifyEmail(email);
+        let classification = await classifyEmail(email);
+
+        // Force important flag for replies/forwards - these are responses we should know about
+        if (email.subject.startsWith('Re:') || email.subject.startsWith('Fwd:')) {
+          logger.info({ subject: email.subject }, 'Detected reply/forward - marking as important');
+          classification.important = true;
+          classification.priority = Math.max(classification.priority, 7);
+          classification.reason = 'Automatic: This is a reply or forwarded message';
+        }
 
         // Store in database
         await prisma.processedEmail.create({
@@ -83,8 +91,8 @@ fastify.post('/process', async (request, reply) => {
           },
         });
 
-        // Send Slack alert if important
-        if (classification.important) {
+        // Send Slack alert for ALL emails
+        try {
           await sendSlackAlert({
             from: email.sender,
             subject: email.subject,
@@ -93,6 +101,13 @@ fastify.post('/process', async (request, reply) => {
             summary: classification.summary,
             threadId: email.threadId,
           });
+          logger.info({ subject: email.subject, sender: email.sender }, 'Slack alert sent for email');
+        } catch (slackError) {
+          logger.error({ 
+            slackError: slackError instanceof Error ? slackError.message : String(slackError),
+            subject: email.subject,
+            sender: email.sender
+          }, 'Failed to send Slack alert, but continuing with email processing');
         }
 
         // Generate draft reply if needed
@@ -152,7 +167,7 @@ fastify.get('/emails/category/:category', async (request) => {
 });
 
 // Polling interval
-let pollingInterval: NodeJS.Timer | null = null;
+let pollingInterval: NodeJS.Timeout | null = null;
 
 fastify.post('/polling/start', async () => {
   if (pollingInterval) {
@@ -168,6 +183,18 @@ fastify.post('/polling/start', async () => {
         try {
           const classification = await classifyEmail(email);
 
+          // Force important flag for replies/forwards
+          let finalClassification = classification;
+          if (email.subject.startsWith('Re:') || email.subject.startsWith('Fwd:')) {
+            logger.info({ subject: email.subject }, 'Detected reply/forward during polling - marking as important');
+            finalClassification = {
+              ...classification,
+              important: true,
+              priority: Math.max(classification.priority, 7),
+              reason: 'Automatic: This is a reply or forwarded message',
+            };
+          }
+
           await prisma.processedEmail.create({
             data: {
               messageId: email.messageId,
@@ -175,23 +202,31 @@ fastify.post('/polling/start', async () => {
               sender: email.sender,
               subject: email.subject,
               body: email.body,
-              category: classification.category,
-              summary: classification.summary,
-              important: classification.important,
-              priority: classification.priority,
-              confidence: classification.confidence,
+              category: finalClassification.category,
+              summary: finalClassification.summary,
+              important: finalClassification.important,
+              priority: finalClassification.priority,
+              confidence: finalClassification.confidence,
             },
           });
 
-          if (classification.important) {
+          // Send Slack alert for ALL emails
+          try {
             await sendSlackAlert({
               from: email.sender,
               subject: email.subject,
-              priority: classification.priority,
-              reason: classification.reason,
-              summary: classification.summary,
+              priority: finalClassification.priority,
+              reason: finalClassification.reason,
+              summary: finalClassification.summary,
               threadId: email.threadId,
             });
+            logger.info({ subject: email.subject, sender: email.sender }, 'Slack alert sent for email during polling');
+          } catch (slackError) {
+            logger.error({ 
+              slackError: slackError instanceof Error ? slackError.message : String(slackError),
+              subject: email.subject,
+              sender: email.sender
+            }, 'Failed to send Slack alert during polling, but continuing');
           }
 
           if (classification.reply_needed) {

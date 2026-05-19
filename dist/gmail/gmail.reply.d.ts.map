@@ -1,0 +1,1 @@
+{"version":3,"file":"gmail.reply.d.ts","sourceRoot":"","sources":["../../src/gmail/gmail.reply.ts"],"names":[],"mappings":"AAGA,UAAU,gBAAgB;IACxB,QAAQ,EAAE,MAAM,CAAC;IACjB,OAAO,EAAE,MAAM,CAAC;IAChB,EAAE,EAAE,MAAM,CAAC;IACX,SAAS,EAAE,MAAM,CAAC;CACnB;AAED,wBAAsB,gBAAgB,CAAC,EACrC,QAAQ,EACR,OAAO,EACP,EAAE,EACF,SAAS,GACV,EAAE,gBAAgB,GAAG,OAAO,CAAC,MAAM,GAAG,IAAI,CAAC,CAoC3C"}
