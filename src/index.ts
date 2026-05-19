@@ -7,6 +7,7 @@ import { getAuthUrl, setCredentials, getOAuth2Client, setOnTokenRefresh } from '
 import { fetchUnreadEmails, markAsProcessed } from './gmail/gmail.poller';
 import { classifyEmail } from './ai/classify';
 import { generateDraftReply } from './ai/draftReply';
+import { polishDraft } from './ai/polishDraft';
 import { sendSlackAlert } from './slack/slack.notify';
 import { createGmailDraft } from './gmail/gmail.reply';
 import prisma from './database/prisma';
@@ -163,6 +164,15 @@ async function runProcessingCycle(userId: string | null): Promise<number> {
           reason: 'Automatic: This is a reply or forwarded message',
         };
       }
+      const urgentWords = ['urgent', 'action required', 'critical', 'asap', 'emergency'];
+      if (!classification.important && urgentWords.some((w) => email.subject.toLowerCase().includes(w))) {
+        classification = {
+          ...classification,
+          important: true,
+          category: 'IMPORTANT',
+          priority: Math.max(classification.priority, 7),
+        };
+      }
 
       await prisma.processedEmail.create({
         data: {
@@ -248,6 +258,60 @@ fastify.get('/emails/category/:category', async (request) => {
     take: 50,
   });
   return { emails, count: emails.length };
+});
+
+// Polish a casual draft into a professional reply (preview only — does not send)
+fastify.post('/reply', async (request, reply) => {
+  const { messageId, casualDraft } = request.body as { messageId: string; casualDraft: string };
+  if (!messageId || !casualDraft?.trim()) {
+    return reply.code(400).send({ error: 'messageId and casualDraft are required' });
+  }
+  const email = await prisma.processedEmail.findUnique({ where: { messageId } });
+  if (!email) {
+    return reply.code(404).send({ error: 'Email not found' });
+  }
+  try {
+    const polished = await polishDraft(casualDraft, { sender: email.sender, subject: email.subject });
+    return reply.send({ polished });
+  } catch (err) {
+    logger.error({ err }, 'Failed to polish draft');
+    return reply.code(500).send({ error: 'Polish failed' });
+  }
+});
+
+// Send a polished reply via Gmail and create a draft record
+fastify.post('/reply/send', async (request, reply) => {
+  const { messageId, polishedText } = request.body as { messageId: string; polishedText: string };
+  if (!messageId || !polishedText?.trim()) {
+    return reply.code(400).send({ error: 'messageId and polishedText are required' });
+  }
+  const email = await prisma.processedEmail.findUnique({ where: { messageId } });
+  if (!email) {
+    return reply.code(404).send({ error: 'Email not found' });
+  }
+  try {
+    const gmail = (await import('./gmail/gmail.client')).getGmailClient();
+    const subject = email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`;
+    const raw = [
+      `To: ${email.sender}`,
+      `Subject: ${subject}`,
+      ``,
+      polishedText,
+    ].join('\n');
+    const encoded = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw: encoded, threadId: email.threadId },
+    });
+    await prisma.processedEmail.update({
+      where: { messageId },
+      data: { repliedAt: new Date(), escalationStatus: 'REPLIED' },
+    });
+    return reply.send({ sent: true });
+  } catch (err) {
+    logger.error({ err }, 'Failed to send reply');
+    return reply.code(500).send({ error: 'Send failed' });
+  }
 });
 
 let pollingInterval: NodeJS.Timeout | null = null;
