@@ -4,6 +4,37 @@ import { NormalizedMessage } from '../types/message.types';
 import logger from '../utils/logger';
 import prisma from '../database/prisma';
 
+export async function fetchEmailsByQuery(q: string, maxResults = 25): Promise<NormalizedMessage[]> {
+  try {
+    logger.debug({ q, maxResults }, 'Fetching emails by query');
+    const gmail = getGmailClient();
+
+    const response = await gmail.users.messages.list({ userId: 'me', q, maxResults });
+
+    if (!response.data.messages) return [];
+
+    const messages: NormalizedMessage[] = [];
+    for (const messageRef of response.data.messages) {
+      const messageDetail = await gmail.users.messages.get({
+        userId: 'me',
+        id: messageRef.id!,
+        format: 'full',
+      });
+      const parsed = parseGmailMessage(messageDetail.data);
+      if (parsed) {
+        const existing = await prisma.processedEmail.findUnique({ where: { messageId: parsed.messageId } });
+        if (!existing) messages.push(parsed);
+      }
+    }
+
+    logger.info({ count: messages.length }, 'Fetched emails by query');
+    return messages;
+  } catch (error) {
+    logger.error({ error }, 'Failed to fetch emails by query');
+    throw error;
+  }
+}
+
 export async function fetchUnreadEmails(): Promise<NormalizedMessage[]> {
   try {
     logger.debug('Fetching unread emails');
@@ -11,8 +42,8 @@ export async function fetchUnreadEmails(): Promise<NormalizedMessage[]> {
 
     const response = await gmail.users.messages.list({
       userId: 'me',
-      q: 'is:unread',
-      maxResults: 10,
+      q: 'is:unread in:inbox',
+      maxResults: 25,
     });
 
     if (!response.data.messages) {

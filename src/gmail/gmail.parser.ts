@@ -41,8 +41,9 @@ export function parseGmailMessage(
       threadId: message.threadId!,
       sender: from,
       subject,
-      body: body.substring(0, 5000), // Limit body size
+      body: body.substring(0, 5000),
       timestamp: date || new Date().toISOString(),
+      labelIds: message.labelIds ?? [],
     };
   } catch (error) {
     logger.error({ error, messageId: message.id }, 'Failed to parse Gmail message');

@@ -6,6 +6,7 @@ export interface NormalizedMessage {
   subject: string;
   body: string;
   timestamp: string;
+  labelIds?: string[];
 }
 
 export interface ClassificationResult {

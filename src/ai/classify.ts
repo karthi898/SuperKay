@@ -15,7 +15,7 @@ RETURN VALID JSON ONLY with this structure:
   "important": boolean,
   "priority": number (1-10),
   "category": "IMPORTANT" | "ROUTINE" | "NOISE",
-  "summary": string,
+  "summary": string (2-3 sentences summarizing the email's main content, key points, and any specific action items or decisions required — do NOT just repeat the subject line),
   "reason": string,
   "reply_needed": boolean,
   "draft_reply": string | null,

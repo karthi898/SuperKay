@@ -14,6 +14,7 @@ model User {
   accessToken  String?
   refreshToken String?
   tokenExpiry  DateTime?
+  pushToken    String?
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
   sessions     MobileSession[]
